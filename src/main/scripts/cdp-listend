@@ -46,10 +46,12 @@ my $nch_smear = undef;
 my $facility = undef;
 my $pidfile = undef;
 my $nofork = undef;
+my $allowlist_file = undef;
 
 my $fetch_def  = "/usr/sbin/ccm-fetch";
 my $nch_def    = "/usr/sbin/cdbsync-nch";
 my $config_def = "/etc/cdp-listend.conf";
+my $allowlist_file_def = "/etc/quattor/cdp-listend.allow";
 my $port_def   = 7777;
 my $fetch_offset_def = 0;
 my $fetch_smear_def  = 300;
@@ -74,6 +76,7 @@ $config->define("help|h!",
         "pidfile=s", {DEFAULT=>"/var/run/cdp-listend.pid"},
         "nofork", {DEFAULT=>0},
         "hostname=s", {DEFAULT=>$hostname_def},
+        "allowlist_file=s", {DEFAULT=>$allowlist_file_def},
          );
 if (!($config->getopt()) || $config->get("help")) {
 print "usage: $0 [OPTIONS]
@@ -107,6 +110,7 @@ $facility = $config->facility();
 $pidfile = $config->pidfile();
 $nofork = $config->nofork();
 $hostname = $config->hostname();
+$allowlist_file = $config->allowlist_file();
 
 
 $s = new IO::Select;
@@ -138,6 +142,13 @@ unless ($ip1=IO::Socket::INET->new(LocalPort => $port, Proto=>'udp',
 }
 $s->add($ip1);
 
+
+my %allowlist = get_allowlist($allowlist_file);
+if (%allowlist) {
+    logit("info", "Loaded " . keys(%allowlist) . " IPs from allowlist");
+} else {
+    logit("info", "Allowlist '$allowlist_file' empty or missing, notifications will be accepted from any IP");
+}
 
 unless ($nofork) {
     $pid = fork;
@@ -192,14 +203,18 @@ while($ip1->recv($newmsg,1024)) {
     my $ntype = $1;
     my $time  = $2;
     logit('info',"Received UDP packet ($ntype|$time) from $r_host");
-    if ($ntype eq "ccm") {
-        my $delay = int(rand($fetch_smear)) + $fetch_offset;
-        call_handler($fetch, "--profile-time=$time", $delay);
-    } elsif ($ntype eq "cdb") {
-        my $delay = int(rand($nch_smear));
-        call_handler($nch, "", $delay);
+    if (!%allowlist || exists($allowlist{$r_host})) {
+        if ($ntype eq "ccm") {
+            my $delay = int(rand($fetch_smear)) + $fetch_offset;
+            call_handler($fetch, "--profile-time=$time", $delay);
+        } elsif ($ntype eq "cdb") {
+            my $delay = int(rand($nch_smear));
+            call_handler($nch, "", $delay);
+        } else {
+            logit('err', "[ERROR] Ignoring packet, unknown notification type");
+        }
     } else {
-        logit('err', "[ERROR] Ignoring packet, unknown notification type");
+        logit('err', "[ERROR] Ignoring packet, $r_host not in allowlist");
     }
 }
 
@@ -222,6 +237,18 @@ sub logit {
     closelog();
     return 1;
 }
+
+sub get_allowlist {
+    my ($listfile) = @_;
+    my @results;
+    open(my $fh, "<", $listfile) or return;
+    while(<$fh>) {
+        chomp;
+        push @results, $_;
+    }
+    close $fh;
+    return map { $_ => 1 } @results;
+};
 
 
 __END__
